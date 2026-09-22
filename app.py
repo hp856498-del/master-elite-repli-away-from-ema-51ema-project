@@ -27,14 +27,14 @@ st.set_page_config(page_title="Crypto EMA Screener", layout="wide")
 st.title("📊 Crypto Away From EMA Screener")
 
 # Initialize Binance via CCXT
-exchange = ccxt.binance({'enableRateLimit': True})
+exchange = ccxt.binance({"enableRateLimit": True})
 _worker_exchange = threading.local()
 
 
 def get_worker_exchange():
     """Create one CCXT client per worker thread for safe parallel requests."""
     if not hasattr(_worker_exchange, "exchange"):
-        _worker_exchange.exchange = ccxt.binance({'enableRateLimit': True})
+        _worker_exchange.exchange = ccxt.binance({"enableRateLimit": True})
     return _worker_exchange.exchange
 
 
@@ -94,18 +94,15 @@ def ohlcv_to_closed_dataframe(ohlcv, selected_tf):
         return pd.DataFrame()
 
     df = pd.DataFrame(
-        ohlcv,
-        columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"]
     )
-    df['datetime'] = pd.to_datetime(
-        df['timestamp'], unit='ms', utc=True
-    ).dt.tz_convert(INDIA_TZ)
+    df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True).dt.tz_convert(
+        INDIA_TZ
+    )
 
     candle_duration = pd.Timedelta(minutes=CANDLE_MINUTES[selected_tf])
     now_ist = pd.Timestamp.now(tz=INDIA_TZ)
-    return df[
-        (df['datetime'] + candle_duration) <= now_ist
-    ].copy()
+    return df[(df["datetime"] + candle_duration) <= now_ist].copy()
 
 
 def get_reference_ema_data(
@@ -160,10 +157,8 @@ def format_ema_proximity(candle, ema):
     return f"{nearest_edge} ({nearest_gap:+.2f}%)"
 
 
-def highlight_close_coin(row):
-    """Highlight a coin when either reference EMA is less than 1% away."""
-    styles = pd.Series("", index=row.index)
-    is_close = False
+def is_close_to_reference_ema(row):
+    """Check whether either reference EMA is less than 1% away."""
     for reference_tf in REFERENCE_EMA_PERIODS:
         proximity = row.get(f"{reference_tf} 51 EMA Proximity", "")
         if not isinstance(proximity, str) or "(" not in proximity:
@@ -173,34 +168,63 @@ def highlight_close_coin(row):
         except ValueError:
             continue
         if abs(gap) < 1:
-            is_close = True
-            break
+            return True
+    return False
 
-    if is_close:
-        styles["Coin"] = "color: red; font-weight: 700"
-    return styles
+
+def render_results_table(result_df):
+    """Render results with Streamlit's built-in table toolbar."""
+    display_df = result_df.copy()
+
+    display_df["Coin"] = display_df.apply(
+        lambda row: f'{row["Coin"]} ({row["Direction"]})',
+        axis=1,
+    )
+    display_df = display_df.drop(columns=["Direction"])
+
+    def style_direction(row):
+        styles = pd.Series("", index=row.index)
+        coin_value = str(row["Coin"])
+        if is_close_to_reference_ema(row):
+            styles["Coin"] = "color: #dc2626; font-weight: 700"
+        elif coin_value.endswith("(U)"):
+            styles["Coin"] = "color: #dc2626; font-weight: 700"
+        elif coin_value.endswith("(D)"):
+            styles["Coin"] = "color: #16a34a; font-weight: 700"
+        return styles
+
+    st.dataframe(
+        display_df.style.apply(style_direction, axis=1),
+        width="stretch",
+    )
 
 
 @st.cache_data(ttl=300)
 def get_top_pairs(limit):
     tickers = exchange.fetch_tickers()
     usdt_pairs = [
-        symbol for symbol in tickers.keys() 
-        if symbol.endswith('/USDT') and 'UP/' not in symbol and 'DOWN/' not in symbol
+        symbol
+        for symbol in tickers.keys()
+        if symbol.endswith("/USDT") and "UP/" not in symbol and "DOWN/" not in symbol
     ]
     sorted_pairs = sorted(
-        usdt_pairs, 
-        key=lambda x: tickers[x].get('quoteVolume', 0) if tickers[x].get('quoteVolume') else 0, 
-        reverse=True
+        usdt_pairs,
+        key=lambda x: tickers[x].get("quoteVolume", 0)
+        if tickers[x].get("quoteVolume")
+        else 0,
+        reverse=True,
     )
     return sorted_pairs[:limit]
+
 
 # Sidebar Controls
 st.sidebar.header("⚙️ Screener Controls")
 
 # 1. Total Coins Selection
 limit_options = [50, 100, 200, 400, 600, 700]
-selected_limit = st.sidebar.selectbox("Top Coins Limit (by Volume)", limit_options, index=1)
+selected_limit = st.sidebar.selectbox(
+    "Top Coins Limit (by Volume)", limit_options, index=1
+)
 
 # 2. Timeframe Selection
 tf_map = {
@@ -210,7 +234,7 @@ tf_map = {
     "2hour": "2h",
     "3hour": "3h",
     "4 hour": "4h",
-    "1 day": "1d"
+    "1 day": "1d",
 }
 selected_tf_label = st.sidebar.selectbox("Timeframe", list(tf_map.keys()), index=2)
 selected_tf = tf_map[selected_tf_label]
@@ -220,8 +244,7 @@ selected_ema = st.sidebar.selectbox("EMA Period", [2, 3, 4, 5, 6], index=1)
 
 # 4. Scan Mode
 scan_mode = st.sidebar.radio(
-    "Scan Mode", 
-    ["Latest Closed Candle", "Date & Time Range Scan"]
+    "Scan Mode", ["Latest Closed Candle", "Date & Time Range Scan"]
 )
 
 start_datetime = None
@@ -242,14 +265,17 @@ else:
     start_datetime = datetime.combine(selected_date, time(0, 0), tzinfo=INDIA_TZ)
     end_datetime = datetime.combine(selected_date, time(23, 59, 59), tzinfo=INDIA_TZ)
 
+
 def check_away_from_ema(df, ema_col):
-    df['max_val'] = df[['open', 'high', 'low', 'close']].max(axis=1)
-    df['min_val'] = df[['open', 'high', 'low', 'close']].min(axis=1)
-    df['is_away'] = (df['min_val'] > df[ema_col]) | (df['max_val'] < df[ema_col])
+    df["max_val"] = df[["open", "high", "low", "close"]].max(axis=1)
+    df["min_val"] = df[["open", "high", "low", "close"]].min(axis=1)
+    df["is_away"] = (df["min_val"] > df[ema_col]) | (df["max_val"] < df[ema_col])
     return df
 
 
-def scan_symbol(symbol, selected_tf, selected_ema, scan_mode, start_datetime, end_datetime):
+def scan_symbol(
+    symbol, selected_tf, selected_ema, scan_mode, start_datetime, end_datetime
+):
     """Fetch and scan one symbol. Called in parallel by the screener."""
     try:
         worker_exchange = get_worker_exchange()
@@ -273,20 +299,18 @@ def scan_symbol(symbol, selected_tf, selected_ema, scan_mode, start_datetime, en
         df = closed_df
 
         ema_name = f"EMA_{selected_ema}"
-        df[ema_name] = ta.trend.ema_indicator(
-            close=df['close'],
-            window=selected_ema
-        )
+        df[ema_name] = ta.trend.ema_indicator(close=df["close"], window=selected_ema)
         df = check_away_from_ema(df, ema_name)
 
         if scan_mode == "Latest Closed Candle":
             rows_to_scan = [df.iloc[-1]]
         else:
             filtered_df = df[
-                (df['datetime'] >= start_datetime)
-                & (df['datetime'] <= end_datetime)
+                (df["datetime"] >= start_datetime) & (df["datetime"] <= end_datetime)
             ]
-            rows_to_scan = filtered_df[filtered_df['is_away'] == True].to_dict('records')
+            rows_to_scan = filtered_df[filtered_df["is_away"] == True].to_dict(
+                "records"
+            )
 
         reference_data = get_reference_ema_data(
             worker_exchange,
@@ -297,17 +321,18 @@ def scan_symbol(symbol, selected_tf, selected_ema, scan_mode, start_datetime, en
         )
         matched_rows = []
         for row in rows_to_scan:
-            if not row['is_away']:
+            if not row["is_away"]:
                 continue
             result = {
                 "Coin": symbol,
-                "Time": row['datetime'].strftime('%Y-%m-%d %H:%M'),
-                "Open": row['open'],
-                "High": row['high'],
-                "Low": row['low'],
-                "Close": row['close'],
+                "Direction": "U" if row["low"] > row[ema_name] else "D",
+                "Time": row["datetime"].strftime("%Y-%m-%d %H:%M"),
+                "Open": row["open"],
+                "High": row["high"],
+                "Low": row["low"],
+                "Close": row["close"],
                 ema_name: round(row[ema_name], 4),
-                "Position": "Above EMA" if row['low'] > row[ema_name] else "Below EMA"
+                "Position": "Above EMA" if row["low"] > row[ema_name] else "Below EMA",
             }
 
             # Match each scanned candle to the most recent completed 1h/4h
@@ -325,8 +350,8 @@ def scan_symbol(symbol, selected_tf, selected_ema, scan_mode, start_datetime, en
                     )
                     ema_value = reference_match.iloc[0]["ema_51"]
 
-                result[f"{reference_tf} 51 EMA Proximity"] = (
-                    format_ema_proximity(row, ema_value)
+                result[f"{reference_tf} 51 EMA Proximity"] = format_ema_proximity(
+                    row, ema_value
                 )
 
                 if reference_tf == "4h":
@@ -341,9 +366,7 @@ def scan_symbol(symbol, selected_tf, selected_ema, scan_mode, start_datetime, en
 
                     result["4h 51/101 EMA Trend"] = trend
                     result["Coin"] = (
-                        f"{coin_marker} {symbol}".strip()
-                        if coin_marker
-                        else symbol
+                        f"{coin_marker} {symbol}".strip() if coin_marker else symbol
                     )
 
             matched_rows.append(result)
@@ -382,9 +405,6 @@ if st.button("🚀 Run Screener"):
         if matched_results:
             result_df = pd.DataFrame(matched_results)
             st.success(f"Total {len(result_df)} instances paye gaye!")
-            st.dataframe(
-                result_df.style.apply(highlight_close_coin, axis=1),
-                use_container_width=True,
-            )
+            render_results_table(result_df)
         else:
             st.warning("Is condition me koi coin nahi mila.")
